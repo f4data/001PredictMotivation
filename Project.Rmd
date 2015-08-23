@@ -1,0 +1,225 @@
+---
+title: "Practical Machine Learning: Weight Lifting Exercise"
+author: "F. Garcia"
+date: "Sunday, August 24, 2015"
+output: html_document
+---
+# Overview
+The goal of this article is to determine whether a user is performing properly a weight lifting exercise. For that purpose the user movements are tracked via sensors and the user will be indicated whether the exercise has been correct (A) or there were some common mistakes present (B, C, D, E). The data has been gathered by Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. in Qualitative Activity Recognition of Weight Lifting Exercises
+
+# Data Loading
+The data set has been obtained from:
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz3jgAWTs2a
+
+```{r global_options, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+require(caret)
+# Load the data
+pml.training <- read.csv(file = "pml-training.csv", na.strings=c("NA", "", "#DIV/0!"))
+pml.testing <- read.csv(file = "pml-testing.csv", na.strings=c("NA", "", "#DIV/0!"))
+
+```
+
+# Exploratory Analysis
+The data set is divided in the following sections: 
+- X: observation number 
+- user_name: User that performed the exercise 
+- time/date: information on the timestamp of the measurement 
+- belt features 
+- arm features 
+- dumbbell features 
+- forearm features 
+- classe: factor that determines whether the exercise is right (A) or is wrong (B,C,D,E) 
+
+# Partition the data
+As the entries for every user are equally distributed, and we have enough information we will use 60% for training, 40% for testing.
+
+```{r}
+# Create training and testing data sets
+library(caret)
+inTrain <- createDataPartition(pml.training$classe, p = 0.6, list=FALSE)
+training <- pml.training[inTrain,]
+testing <- pml.training[-inTrain,]
+
+# Reproducible Research requires setting a seed
+set.seed(7)
+
+# Separate the variables and the outcome
+train_out <- training[,160]
+training <- training[,-160]
+
+test_out <- testing[,160]
+testing <- testing[,-160]
+
+```
+# Clean the data
+It can be seen that many variables have more than 95% of NAs. These variables will be discarded.
+We will discard the time variables as we will not do any time prediction, and the variables *X* and *user_name*, because both of them contain values that are unique to the training set. New values, will not have the same time or user name. 
+
+```{r}
+# Remove variables with more than 50% of NAs
+na.percentage <- apply(training, 2, function(x) { sum(is.na(x))/nrow(training) })
+isValid <- na.percentage < 0.5
+training <- subset(training, select = isValid)
+
+# Remove time and variables specific to the training set
+training <- subset(training, select=c(-X, -user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -num_window))
+
+```
+
+# Preprocessing
+
+## Near Zero Variance values
+Search for the Near Zero Values and eliminate them as they will be bad predictors. There are no NZV values present in the current list of variables.
+```{r}
+
+# Remove Near Zero Variance Variables
+nzvs <- nearZeroVar(training)
+if (length(nzvs)) 
+{
+        training <- subset(training, select = -nzvs)        
+}
+        
+```
+
+## Identifying Correlated Predictors
+There are 7 variables that are correlated on more than 90% with other variables. We can remove them.
+```{r}
+descrCor <- cor(training)
+correlatedVars <- findCorrelation(descrCor)
+if (length(descrCor))
+{
+        training <- subset(training, select = -correlatedVars)
+}
+
+correlatedVars
+```
+
+## Find Linear Combos
+No variables are a linear combination of other variables.
+```{r}
+lcomboVars <- findLinearCombos(training)
+if (length(lcomboVars$remove))
+{
+        training <- subset(training, select = -lcomboVars$remove)
+}
+
+```
+
+## Center and Scaling
+Let's normalize the training data. We will have to normalize as well the testing data.
+```{r}
+preProcValuesCS <- preProcess(training, method = c("center","scale"))
+training <- predict(preProcValuesCS, training)
+
+```
+
+# Model Selection
+As this is a classification problem we will use trees mainly to create the model, but we will compare with QDA model as well.
+The train funtion in caret allows using the train data set to perform cross-validation of the data and adjust the model. We will take advantage of this feature, but we need to tune the parameters. 
+
+## Small subset
+Instead of using a big set of data, to compare different models let's work with a 10th of the training set.
+```{r}
+# Use a small sample set
+folds <- createFolds(train_out, k=10, list=TRUE, returnTrain=FALSE)
+tr <- training[folds$Fold01,]
+tr_out <- train_out[folds$Fold01]
+
+```
+## Cross-validation
+In order to test our model we will not use the default bootstraping method but cross-validation. For that purpose we define a 3-fold to use inside the validation phase of the train method.
+
+```{r}
+tCtrl <- trainControl(method ="cv", number = 3)
+
+```
+## QDA
+Let's try the Quadratic Discriminant Analysis. We see it gets already with a small sample set 86% accuracy. It is very fast and delivers very good in-sample accuracy even for such a small dataset.
+```{r, cache=TRUE}
+system.time(fitQDA <- train(y = tr_out, x = tr, method="qda", trControl=tCtrl))
+
+fitQDA$results
+
+```
+## Gbm
+Let's try the Gradient Boosting Machine method. With an accuracy of 89% the optimal parameters are n.trees=150 and interaction.depth=3. See Figure 1 below.
+```{r, cache=TRUE}
+system.time(fitGbm <- train(y = tr_out, x = tr, method="gbm", trControl = tCtrl, verbose=FALSE))
+fitGbm$bestTune
+
+plot(fitGbm, main="Fig 1. Gradient Boosting model parameters")
+
+# Set the parameters
+gbmGrid <- expand.grid(fitGbm$bestTune)
+```
+## Random Forest
+With Random Forest, we analyze what parameters give better performance. We can see that for mtry =24 we get the best accuracy 90%.
+
+```{r, cache=TRUE}
+
+system.time(fitRF <- train(y = tr_out, x = tr, method="rf", trControl = tCtrl))
+fitRF$bestTune
+
+plot(fitRF, main="Fig 2. Random Forest model parameters")
+
+# Set the parameters
+rfGrid <- expand.grid(fitRF$bestTune)
+        
+```
+
+## Final Model
+We can compare what is the accuracy of the three selected models. But first we have to train the models with the tuned parameters and the full training data set.
+```{r, cache=TRUE}
+system.time(fitQDAfinal <- train(y = train_out, x = training, method = "qda", trControl = tCtrl))
+predQDA <- predict(fitQDAfinal, training)
+confusionMatrix(predQDA, train_out)$overall
+
+system.time(fitGBMfinal <- train(y = train_out, x = training, method = "gbm", trControl = tCtrl, tuneGrid = gbmGrid, verbose=FALSE))
+predGbm <- predict(fitGBMfinal, training)
+confusionMatrix(predGbm, train_out)$overall
+
+system.time(fitRFfinal <- train(y = train_out, x = training, method = "rf", trControl = tCtrl, tuneGrid = rfGrid))
+predRF <- predict(fitRFfinal, training)
+confusionMatrix(predRF, train_out)$overall
+
+```
+The best accuracy is obtained by the Random Forest model. We will select it as our final model.
+
+# Out-of-Sample Error
+To measure the out of sample error we can use the testing set. 
+
+We will perform the same conversions on the testing set of data to predict the results.
+```{r}
+# Select RF as best model
+fit <- fitRFfinal
+
+# Take same features as training set
+testing <- subset(testing, select = names(training))
+testing <- predict(preProcValuesCS, testing)
+predTest <- predict(fit, testing)
+confusionMatrix(predTest, test_out)$overall
+
+```
+The **out of sample error estimated is 0.0088**.
+
+# Predict the Testing data set
+The selected model will be applied to the original testing set to predict 20 values.
+```{r}
+pml.testing <- subset(pml.testing, select= names(training))
+pml.testing <- predict(preProcValuesCS, pml.testing)
+answers <- predict(fit, pml.testing)
+
+# Define a function to write the results into files
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+
+```
